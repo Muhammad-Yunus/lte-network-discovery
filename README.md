@@ -151,35 +151,38 @@ Field test performed on **Raspberry Pi 4** with **RTL-SDR V3** at **Band 8 (900 
 | Location | Indonesia |
 | Date | July 2026 |
 
-### Scan Results — Band 8, EARFCN 3495–3510
+### Scan Results — Band 8 (Fast Scan)
 
-| EARFCN | Freq (MHz) | PCI | PRB | Ant | RSRP (dBm) | Operator | MCC | MNC | Source |
-|:---:|:---:|:---:|:---:|:---:|:---:|---|:---:|:---:|:---:|
-| 3502 | 930.2 | 243 | 50 | 4 | — | **Telkomsel** | 510 | 10 | MIB |
-| 3503 | 930.3 | 2 | 6 | — | — | **Telkomsel** | 510 | 10 | EARFCN |
-| 3501 | 930.1 | 416 | — | — | — | **Telkomsel** | 510 | 10 | EARFCN |
-| 3500 | 930.0 | 2 | — | — | — | **Telkomsel** | 510 | 10 | EARFCN |
+| EARFCN | Freq (MHz) | PCI | RSRP (dBm) | Operator | MCC | MNC |
+|:---:|:---:|:---:|:---:|---|:---:|:---:|
+| 3500 | 930.0 | 334 | -29.7 | **Telkomsel** | 510 | 10 |
+| 3550 | 935.0 | 243 | -29.9 | **XL Axiata** | 510 | 11 |
+| 3650 | 945.0 | 1 | -33.5 | **Indosat Ooredoo** | 510 | 21 |
+
+### Scan Results — Band 5 (Fast Scan)
+
+| EARFCN | Freq (MHz) | PCI | RSRP (dBm) | Operator | MCC | MNC |
+|:---:|:---:|:---:|:---:|---|:---:|:---:|
+| 2450 | 874.0 | 1 | -26.5 | **Telkomsel** | 510 | 10 |
+| 2500 | 879.0 | 264 | -23.2 | **Smartfren** | 510 | 9 |
 
 ### Performance
 
 | Metric | Value |
 |---|---|
-| Coarse scan (15 EARFCNs) | ~15 seconds |
-| Fine scan (per cell) | ~8–10 seconds |
-| Total (15 EARFCNs) | ~100 seconds |
-| Cells detected | 9 (PSS) → 8 (valid after MIB) |
-| MIB decode success | 1/8 (PCI 243, 50 PRB) |
-| Operator identification | 8/8 (100% via EARFCN table) |
+| Fast scan per band | ~3 seconds |
+| Cells detected (B8) | 3 (Telkomsel, XL Axiata, Indosat) |
+| Cells detected (B5) | 2 (Telkomsel, Smartfren) |
+| Operator identification | 100% via EARFCN table |
 
 ### Limitations
 
 | Constraint | Details |
 |---|---|
 | RTL-SDR bandwidth | ~3.2 MHz max — cannot decode SIB1 for typical cells (5–20 MHz) |
-| MIB decode | Works at 1.92 MHz sampling rate for any cell |
-| SIB1 decode | Only works for very narrow cells (≤6 PRB / 1.4 MHz) |
 | Operator accuracy | ~95% — based on Kominfo allocation, not SIB1 air data |
-| Band support | Limited by RTL-SDR V3: Band 8 works well, Band 3 PLL may fail |
+| Band support | Band 8 (900 MHz) and Band 5 (850 MHz) work well. Band 3 (1800) and Band 40 (2300) hit RTL-SDR V3 PLL limits. Band 28 (700) no coverage in test area. |
+| SIB1 decode | Not attempted — requires ≥3 MHz BW, impractical on RTL-SDR |
 
 ---
 
@@ -190,68 +193,73 @@ Field test performed on **Raspberry Pi 4** with **RTL-SDR V3** at **Band 8 (900 
 ```bash
 # Raspberry Pi OS (Debian-based)
 sudo apt update
-sudo apt install -y build-essential cmake git libsoapysdr-dev
-
-# Clone srsRAN_4G
-git clone https://github.com/srsran/srsRAN_4G.git
-cd srsRAN_4G
+sudo apt install -y build-essential cmake git libsoapysdr-dev libfftw3-dev
 ```
 
-### Build
+### Step 1: Build srsRAN 4G
 
 ```bash
+git clone https://github.com/srsran/srsRAN_4G.git
+cd srsRAN_4G
 mkdir build && cd build
 cmake .. -DCMAKE_BUILD_TYPE=Release
 make -j$(nproc)
+sudo make install
+cd ../..
+```
 
-# Build LTE Network Discovery
-cmake --build . --target lte_scan_example
+### Step 2: Build LTE Network Discovery
+
+```bash
+git clone https://github.com/Muhammad-Yunus/lte-network-discovery.git
+cd lte-network-discovery
+mkdir build && cd build
+cmake .. -DCMAKE_BUILD_TYPE=Release
+make -j$(nproc)
 ```
 
 ### Usage
 
 ```bash
-# Scan Band 8 (900 MHz) — two-step mode
-./lib/examples/lte_scan_example -b 8 -g 42
+# Scan Band 8 (900 MHz) — fast scan
+./lte_scan_example -b 8 -g 42
 
-# Scan specific EARFCN range
-./lib/examples/lte_scan_example -b 8 -g 42 -s 3490 -e 3520
+# JSON output
+./lte_scan_example -b 8 -j
 
-# Full band scan (one-step, slow)
-./lib/examples/lte_scan_example -b 8 -g 42 -1
+# Quiet mode (no SoapySDR log spam)
+./lte_scan_example -b 8 -j -q
 
-# Scan Band 3 (1800 MHz)
-./lib/examples/lte_scan_example -b 3 -g 42
+# Scan Band 5 (850 MHz)
+./lte_scan_example -b 5 -g 42
+
+# Lookup EARFCN tanpa SDR
+./lte_scan_example -l 3500
+```
+
+### Run Unit Tests
+
+```bash
+./test_lte_scan
+# or
+ctest
 ```
 
 ### Output Example
 
 ```
-=== LTE Cell Scanner ===
-Band: 8 | Gain: 42 dB | Mode: two-step (fast)
+$ ./lte_scan_example -b 8 -j
 
---- Step 1: Coarse scan (PSS only) ---
-[lte_scan] Coarse scan Band 8: 15 EARFCNs (929.5 - 930.9 MHz)
- Found PCI 243 (PSR 2.8)
- Found PCI 0 (PSR 3.5)
- Found PCI 2 (PSR 2.2)
-
---- Step 2: Fine scan (MIB + operator) ---
-[lte_scan] Fine scan EARFCN 3502  930.20 MHz ... PCI 243 | 50 PRB | Telkomsel
-[lte_scan] Fine scan EARFCN 3505  930.50 MHz ... PCI 0 | 0 PRB | Telkomsel
-[lte_scan] Fine scan EARFCN 3506  930.60 MHz ... PCI 2 | 0 PRB | Telkomsel
-
-========================================
-  RESULTS: 3 cell(s) found on Band 8
-========================================
-
-Cell #1
-  EARFCN:  3502 (930.2 MHz)
-  PCI:     243
-  PRB:     50
-  Ports:   4
-  Operator: Telkomsel
-  MCC/MNC: 510/010 [from EARFCN table]
+Fast scan Band 8...
+{
+  "band": 8, "gain_db": 42, "mode": "fast",
+  "cells": [
+    {"earfcn":3500,"freq_mhz":930.0,"pci":334,"prb":null,"ports":null,"rsrp":-29.7,"operator":"Telkomsel","mcc":510,"mnc":10,"plmn":"51010"},
+    {"earfcn":3550,"freq_mhz":935.0,"pci":243,"prb":null,"ports":null,"rsrp":-29.9,"operator":"XL Axiata","mcc":510,"mnc":11,"plmn":"51011"},
+    {"earfcn":3650,"freq_mhz":945.0,"pci":1,"prb":null,"ports":null,"rsrp":-33.5,"operator":"Indosat Ooredoo","mcc":510,"mnc":21,"plmn":"51021"}
+  ],
+  "total": 3
+}
 ```
 
 ---
@@ -292,6 +300,7 @@ lte_scan_free(&scan);
 | Function | Description | Time |
 |---|---|---|
 | `lte_scan_init()` | Open SDR device, configure gain | ~2s |
+| `lte_scan_fast()` | PSS scan + operator table (no MIB) | ~3s/band |
 | `lte_scan_coarse()` | Fast PSS scan across band | ~1s/EARFCN |
 | `lte_scan_fine()` | MIB decode + operator lookup | ~8s/cell |
 | `lte_scan_band()` | One-step scan (slow) | ~3s/EARFCN |
@@ -358,11 +367,16 @@ EARFCN → Frequency (3GPP formula) → Spectrum allocation (Kominfo) → Operat
 ```
 lte-network-discovery/
 ├── README.md              ← this file
+├── CMakeLists.txt         ← standalone build (links srsRAN installed libs)
 ├── src/
 │   ├── lte_scan.h         ← public API header
 │   └── lte_scan.cc        ← implementation (srsRAN + operator table)
-└── examples/
-    └── lte_scan_example.c ← CLI example program
+├── examples/
+│   ├── lte_scan_example.c ← CLI tool (text / JSON output)
+│   ├── lte_discover.py    ← Python wrapper (calls CLI via subprocess)
+│   └── scan_example.py    ← Python example
+└── tests/
+    └── test_lte_scan.c    ← unit tests (10 offline tests, no SDR needed)
 ```
 
 ---
