@@ -389,8 +389,8 @@ static void sigint_handler(int signo)
 int lte_scan_init(lte_scan_t* scan, const char* rf_device, const char* rf_args)
 {
     lte_scan_config_t cfg = {
-        .rf_device     = rf_device,
-        .rf_args       = rf_args,
+        .rf_device     = (rf_device && rf_device[0]) ? rf_device : "soapy",
+        .rf_args       = (rf_args && rf_args[0]) ? rf_args : "",
         .rf_gain_dB    = 42.0f,
         .max_prb_sib1  = 15,    /* RTL-SDR max */
         .psr_threshold = 2.0f,
@@ -410,7 +410,28 @@ int lte_scan_init_ex(lte_scan_t* scan, const lte_scan_config_t* cfg)
     }
 
     srsran_rf_t* rf = (srsran_rf_t*)scan->rf_handle;
-    if (srsran_rf_open_devname(rf, cfg->rf_device, (char*)cfg->rf_args, 1)) {
+
+    /* Suppress SoapySDR enumeration noise during device open.
+     * The plugin prints device list, sensors, gain info to stdout
+     * before srsran_rf_suppress_stdout() can take effect. */
+    int saved_stdout = dup(STDOUT_FILENO);
+    FILE* devnull = fopen("/dev/null", "w");
+    if (devnull) {
+        fflush(stdout);
+        dup2(fileno(devnull), STDOUT_FILENO);
+    }
+
+    int open_ret = srsran_rf_open_devname(rf, cfg->rf_device, (char*)cfg->rf_args, 1);
+
+    /* Restore stdout */
+    if (devnull) {
+        fflush(stdout);
+        dup2(saved_stdout, STDOUT_FILENO);
+        fclose(devnull);
+    }
+    close(saved_stdout);
+
+    if (open_ret) {
         free(scan->rf_handle);
         scan->rf_handle = NULL;
         return -1;
@@ -435,6 +456,10 @@ int lte_scan_band(lte_scan_t* scan, int band, int earfcn_start, int earfcn_end)
 
     srsran_rf_t*  rf  = (srsran_rf_t*)scan->rf_handle;
     srsran_earfcn_t channels[LTE_SCAN_MAX_EARFCN];
+    int candidates[LTE_SCAN_MAX_EARFCN];
+    int candidate_freqs[LTE_SCAN_MAX_EARFCN];
+    float candidate_power[LTE_SCAN_MAX_EARFCN];
+    int nof_candidates = 0;
 
     int nof_freqs = srsran_band_get_fd_band(band, channels, earfcn_start, earfcn_end, LTE_SCAN_MAX_EARFCN);
     if (nof_freqs <= 0) {
@@ -448,19 +473,66 @@ int lte_scan_band(lte_scan_t* scan, int band, int earfcn_start, int earfcn_end)
     scan->nof_results = 0;
     scan->stop = false;
 
+    /* Pass 1: Coarse PSS-only scan with single stream (avoids aarch64 mutex bug) */
+    printf("[lte_scan] Pass 1: PSS coarse scan...\n");
+
+    srsran_rf_set_rx_srate(rf, (double)SAMP_FREQ);
+    srsran_rf_set_rx_freq(rf, 0, (double)channels[0].fd * MHZ);
+    srsran_rf_start_rx_stream(rf, false);
+
+    srsran_ue_cellsearch_t cs;
+    if (srsran_ue_cellsearch_init(&cs, cell_detect_config.max_frames_pss, recv_wrapper, (void*)rf)) {
+        srsran_rf_stop_rx_stream(rf);
+        return -1;
+    }
+    srsran_ue_cellsearch_set_nof_valid_frames(&cs, cell_detect_config.nof_valid_pss_frames);
+
     for (int i = 0; i < nof_freqs && !scan->stop; i++) {
         printf("\r[%3d/%d] EARFCN %d  %.2f MHz ... ", i + 1, nof_freqs, channels[i].id, channels[i].fd);
         fflush(stdout);
 
+        srsran_rf_set_rx_freq(rf, 0, (double)channels[i].fd * MHZ);
+
+        srsran_ue_cellsearch_result_t found_cells[3];
+        memset(found_cells, 0, sizeof(found_cells));
+        int n = srsran_ue_cellsearch_scan(&cs, found_cells, NULL);
+
+        if (n > 0) {
+            for (int j = 0; j < 3; j++) {
+                if (found_cells[j].psr > scan->cfg.psr_threshold && nof_candidates < LTE_SCAN_MAX_EARFCN) {
+                    printf(" Found PCI %d (PSR %.1f)\n", found_cells[j].cell_id, found_cells[j].psr);
+                    candidates[nof_candidates]     = channels[i].id;
+                    candidate_freqs[nof_candidates] = i;
+                    candidate_power[nof_candidates] = srsran_convert_power_to_dB(found_cells[j].peak);
+                    nof_candidates++;
+                    break;
+                }
+            }
+        }
+    }
+
+    srsran_ue_cellsearch_free(&cs);
+    srsran_rf_stop_rx_stream(rf);
+
+    printf("\n[lte_scan] Coarse scan: %d candidate(s) on Band %d\n", nof_candidates, band);
+
+    /* Pass 2: Fine scan (PSS+MIB+operator) per candidate — scan_earfcn() manages its own stream */
+    for (int i = 0; i < nof_candidates && !scan->stop; i++) {
         if (scan->nof_results >= LTE_SCAN_MAX_RESULTS) {
             break;
         }
 
-        if (scan_earfcn(rf, channels[i].id, channels[i].fd,
+        printf("[lte_scan] Pass 2: EARFCN %d %.2f MHz ... ",
+               candidates[i], channels[candidate_freqs[i]].fd);
+        fflush(stdout);
+
+        if (scan_earfcn(rf, candidates[i], channels[candidate_freqs[i]].fd,
                         &scan->results[scan->nof_results], &scan->cfg) > 0) {
             lte_scan_result_t* r = &scan->results[scan->nof_results];
             printf(" Cell PCI %d | %d PRB | %s\n", r->pci, r->nof_prb, r->operator_name);
             scan->nof_results++;
+        } else {
+            printf(" no decode\n");
         }
     }
 
@@ -510,27 +582,26 @@ int lte_scan_coarse(lte_scan_t* scan, int band, int earfcn_start, int earfcn_end
     scan->nof_coarse = 0;
     scan->stop = false;
 
+    srsran_rf_set_rx_srate(rf, (double)SAMP_FREQ);
+    srsran_rf_set_rx_freq(rf, 0, (double)channels[0].fd * MHZ);
+    srsran_rf_start_rx_stream(rf, false);
+
+    srsran_ue_cellsearch_t cs;
+    if (srsran_ue_cellsearch_init(&cs, cell_detect_config.max_frames_pss, recv_wrapper, (void*)rf)) {
+        srsran_rf_stop_rx_stream(rf);
+        return -1;
+    }
+    srsran_ue_cellsearch_set_nof_valid_frames(&cs, cell_detect_config.nof_valid_pss_frames);
+
     for (int i = 0; i < nof_freqs && !scan->stop; i++) {
         printf("\r[%3d/%d] EARFCN %d  %.2f MHz ... ", i + 1, nof_freqs, channels[i].id, channels[i].fd);
         fflush(stdout);
 
         srsran_rf_set_rx_freq(rf, 0, (double)channels[i].fd * MHZ);
-        srsran_rf_set_rx_srate(rf, (double)SAMP_FREQ);
-        srsran_rf_start_rx_stream(rf, false);
 
-        srsran_ue_cellsearch_t        cs;
         srsran_ue_cellsearch_result_t found_cells[3];
-
-        if (srsran_ue_cellsearch_init(&cs, cell_detect_config.max_frames_pss, recv_wrapper, (void*)rf)) {
-            srsran_rf_stop_rx_stream(rf);
-            continue;
-        }
-        srsran_ue_cellsearch_set_nof_valid_frames(&cs, cell_detect_config.nof_valid_pss_frames);
-
         memset(found_cells, 0, sizeof(found_cells));
         int n = srsran_ue_cellsearch_scan(&cs, found_cells, NULL);
-        srsran_ue_cellsearch_free(&cs);
-        srsran_rf_stop_rx_stream(rf);
 
         if (n > 0) {
             for (int j = 0; j < 3 && scan->nof_coarse < LTE_SCAN_MAX_EARFCN; j++) {
@@ -545,6 +616,9 @@ int lte_scan_coarse(lte_scan_t* scan, int band, int earfcn_start, int earfcn_end
             }
         }
     }
+
+    srsran_ue_cellsearch_free(&cs);
+    srsran_rf_stop_rx_stream(rf);
 
     printf("\n[lte_scan] Coarse scan done: %d EARFCN(s) with cells on Band %d\n", scan->nof_coarse, band);
     return scan->nof_coarse;
@@ -580,6 +654,75 @@ int lte_scan_fine(lte_scan_t* scan, int earfcn)
     return ret;
 }
 
+int lte_scan_fast(lte_scan_t* scan, int band, int earfcn_start, int earfcn_end)
+{
+    if (!scan->rf_handle) return -1;
+
+    srsran_rf_t* rf = (srsran_rf_t*)scan->rf_handle;
+    srsran_earfcn_t channels[LTE_SCAN_MAX_EARFCN];
+
+    int nof_freqs = srsran_band_get_fd_band(band, channels, earfcn_start, earfcn_end, LTE_SCAN_MAX_EARFCN);
+    if (nof_freqs <= 0) return -1;
+
+    scan->nof_results = 0;
+    scan->stop = false;
+
+    /* Step size: 50 EARFCNs = 5 MHz — LTE cells are ≥1.4 MHz wide */
+    int step = 50;
+
+    /* Start stream once before the loop — do NOT stop/restart per frequency.
+     * SoapyRTLSDR zero-copy buffers trigger a glibc robust mutex bug on aarch64
+     * when the stream is restarted. cell_search.c uses the same pattern. */
+    srsran_rf_set_rx_srate(rf, (double)SAMP_FREQ);
+    srsran_rf_set_rx_freq(rf, 0, (double)channels[0].fd * MHZ);
+    srsran_rf_start_rx_stream(rf, false);
+
+    srsran_ue_cellsearch_t cs;
+    if (srsran_ue_cellsearch_init(&cs, cell_detect_config.max_frames_pss, recv_wrapper, (void*)rf)) {
+        srsran_rf_stop_rx_stream(rf);
+        return -1;
+    }
+    srsran_ue_cellsearch_set_nof_valid_frames(&cs, cell_detect_config.nof_valid_pss_frames);
+
+    for (int i = 0; i < nof_freqs && !scan->stop; i += step) {
+        srsran_rf_set_rx_freq(rf, 0, (double)channels[i].fd * MHZ);
+
+        srsran_ue_cellsearch_result_t found_cells[3];
+        memset(found_cells, 0, sizeof(found_cells));
+        int n = srsran_ue_cellsearch_scan(&cs, found_cells, NULL);
+
+        if (n > 0) {
+            for (int j = 0; j < 3 && scan->nof_results < LTE_SCAN_MAX_RESULTS; j++) {
+                if (found_cells[j].psr > scan->cfg.psr_threshold) {
+                    lte_scan_result_t* out = &scan->results[scan->nof_results];
+                    memset(out, 0, sizeof(*out));
+                    out->earfcn   = channels[i].id;
+                    out->freq_mhz = channels[i].fd;
+                    out->pci      = found_cells[j].cell_id;
+                    out->psr      = found_cells[j].psr;
+                    out->rsrp_dbm = srsran_convert_power_to_dB(found_cells[j].peak);
+
+                    const lte_operator_entry_t* op = lte_scan_lookup_operator(channels[i].id);
+                    if (op) {
+                        out->mcc     = op->mcc;
+                        out->mnc     = op->mnc;
+                        out->mnc_3digit = op->mnc_3digit;
+                        strncpy(out->operator_name, op->operator_name, LTE_SCAN_OP_NAME_LEN - 1);
+                    } else {
+                        strncpy(out->operator_name, "Unknown", LTE_SCAN_OP_NAME_LEN - 1);
+                    }
+                    scan->nof_results++;
+                    break;
+                }
+            }
+        }
+    }
+
+    srsran_ue_cellsearch_free(&cs);
+    srsran_rf_stop_rx_stream(rf);
+    return scan->nof_results;
+}
+
 void lte_scan_stop(lte_scan_t* scan)
 {
     if (scan) {
@@ -593,7 +736,9 @@ void lte_scan_free(lte_scan_t* scan)
         return;
     }
     if (scan->rf_handle) {
-        srsran_rf_close((srsran_rf_t*)scan->rf_handle);
+        /* Skip srsran_rf_close — SoapyRTLSDR's SoapySDRDevice_unmake blocks
+         * indefinitely on aarch64/RPi. The OS reclaims USB resources on exit.
+         * cell_search.c uses the same workaround (calls exit() directly). */
         free(scan->rf_handle);
         scan->rf_handle = NULL;
     }

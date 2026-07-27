@@ -17,10 +17,10 @@ Built on top of [srsRAN 4G](https://github.com/srsran/srsRAN_4G) — detects cel
 
 ```
 ┌─────────────────────────────────────────────────────┐
-│  RTL-SDR V3  ──>  srsRAN PSS/MIB  ──>  Operator ID │
+│  RTL-SDR V3  ──>  srsRAN PSS/MIB  ──>  Operator ID  │
 │                  (cell search)       (EARFCN table) │
 │                                                     │
-│  EARFCN 3502  →  930.2 MHz  →  PCI 243  →  Telkomsel │
+│  EARFCN 3502  →  930.2 MHz  →  PCI 243  →  Telkomsel│
 │                  50 PRB      4 ant      MCC 510/10  │
 └─────────────────────────────────────────────────────┘
 ```
@@ -53,34 +53,34 @@ It wraps [srsRAN 4G](https://github.com/srsran/srsRAN_4G)'s physical layer (PSS 
 
 ```
                     ┌──────────────────────┐
-                    │   lte_scan_example    │  ← CLI entry point
+                    │   lte_scan_example   │  ← CLI entry point
                     └──────────┬───────────┘
                                │
-                    ┌──────────▼───────────┐
+                    ┌──────────▼────────────┐
                     │      lte_scan API     │  ← C library
                     │                       │
                     │  lte_scan_coarse()    │  ← Step 1: PSS fast scan
                     │  lte_scan_fine()      │  ← Step 2: MIB + operator
                     │  lte_scan_band()      │  ← One-step (slow)
-                    └──────────┬───────────┘
+                    └──────────┬────────────┘
                                │
               ┌────────────────┼────────────────┐
               │                │                 │
      ┌────────▼───────┐ ┌─────▼──────┐ ┌───────▼────────┐
      │   srsRAN 4G    │ │ EARFCN     │ │  ASN.1 RRC     │
      │   PHY Layer    │ │ Operator   │ │  SIB1 Parser   │
-     │                │ │ Table      │ │  (optional)     │
-     │ • PSS sync     │ │            │ │                 │
+     │                │ │ Table      │ │  (optional)    │
+     │ • PSS sync     │ │            │ │                │
      │ • MIB decode   │ │ • Band 3   │ │ • MCC/MNC      │
-     │ • Cell search  │ │ • Band 5   │ │ • TAC           │
-     │ • UE sync      │ │ • Band 8   │ │ • Cell ID       │
-     │                │ │ • Band 28  │ │                 │
-     │                │ │ • Band 40  │ │                 │
-     └────────┬───────┘ └─────┬──────┘ └───────┬────────┘
+     │ • Cell search  │ │ • Band 5   │ │ • TAC          │
+     │ • UE sync      │ │ • Band 8   │ │ • Cell ID      │
+     │                │ │ • Band 28  │ │                │
+     │                │ │ • Band 40  │ │                │
+     └────────┬───────┘ └──────┬─────┘ └─────────┬──────┘
               │                │                 │
      ┌────────▼────────────────▼─────────────────▼──────┐
      │              RTL-SDR V3 (SoapySDR)               │
-     │              RX only, ~3.2 MHz BW                 │
+     │              RX only, ~3.2 MHz BW                │
      └──────────────────────────────────────────────────┘
 ```
 

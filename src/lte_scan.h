@@ -138,6 +138,13 @@ int lte_scan_coarse(lte_scan_t* scan, int band, int earfcn_start, int earfcn_end
 int lte_scan_fine(lte_scan_t* scan, int earfcn);
 
 /**
+ * Fast scan — PSS only + operator table lookup (no MIB decode).
+ * ~1s per EARFCN. Results have PCI + operator but no PRB/ports.
+ * @return Number of cells found.
+ */
+int lte_scan_fast(lte_scan_t* scan, int band, int earfcn_start, int earfcn_end);
+
+/**
  * Scan a single EARFCN (PSS + MIB + operator).
  * @return 1 if cell found, 0 if no cell, -1 on error.
  */
